@@ -4,15 +4,31 @@ import ServiceManagement
 
 // MARK: - Scroll direction
 
-// Same plist key System Settings > Trackpad > "Natural scrolling" writes to. The OS applies
-// it live system-wide the moment it changes — no relaunch or logout needed, since direction
-// is flipped at the HID event layer rather than cached per-app.
+// Writing the com.apple.swipescrolldirection plist key alone does NOT change live scrolling:
+// the pref updates but the HID event system keeps its old direction until something tells
+// it. System Settings > Trackpad > "Natural scrolling" calls setSwipeScrollDirection() in the
+// private PreferencePanesSupport framework, which both writes the key and pushes the new
+// direction to the HID layer, so we call that. If it's ever missing, fall back to writing the
+// key (takes effect after logout) and posting the notification System Settings posts.
 enum ScrollPreference {
     private static let key = "com.apple.swipescrolldirection" as CFString
 
+    private typealias SetSwipeScrollDirection = @convention(c) (Bool) -> Void
+    private static let setSwipeScrollDirection: SetSwipeScrollDirection? = {
+        guard let handle = dlopen("/System/Library/PrivateFrameworks/PreferencePanesSupport.framework/PreferencePanesSupport", RTLD_LAZY),
+              let symbol = dlsym(handle, "setSwipeScrollDirection")
+        else { return nil }
+        return unsafeBitCast(symbol, to: SetSwipeScrollDirection.self)
+    }()
+
     static func apply(natural: Bool) {
+        if let setSwipeScrollDirection {
+            setSwipeScrollDirection(natural)
+            return
+        }
         CFPreferencesSetValue(key, natural ? kCFBooleanTrue : kCFBooleanFalse, kCFPreferencesAnyApplication, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
         CFPreferencesSynchronize(kCFPreferencesAnyApplication, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+        DistributedNotificationCenter.default().postNotificationName(.init("SwipeScrollDirectionDidChangeNotification"), object: nil, userInfo: nil, deliverImmediately: true)
     }
 }
 
